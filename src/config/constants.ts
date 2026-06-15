@@ -1,3 +1,16 @@
 export const TEMP_FILE_PREFIX = ".editprompt-";
 export const TEMP_FILE_EXTENSION = ".md";
 export const DEFAULT_EDITOR = "vim";
+
+// tmux sends each command to its server as a single imsg frame capped at
+// 16KB (16384 bytes). Use half of that limit as the body chunk size to leave
+// room for the `tmux send-keys -t '...' -- '...'` wrapper and the single-quote
+// escaping expansion. Long content is split into chunks of this size and sent
+// with successive send-keys calls to avoid the "command too long" error.
+const TMUX_IMSG_LIMIT_BYTES = 16 * 1024;
+export const TMUX_SEND_CHUNK_BYTES = TMUX_IMSG_LIMIT_BYTES / 2;
+
+// wezterm's send-text passes content as a shell argument, which is bounded by
+// ARG_MAX (typically 256KB+) rather than imsg, so it has more headroom. Reuse
+// the same chunk size for simplicity and consistency.
+export const WEZTERM_SEND_CHUNK_BYTES = TMUX_SEND_CHUNK_BYTES;

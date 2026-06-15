@@ -1,6 +1,8 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { getLogger } from "@logtape/logtape";
+import { WEZTERM_SEND_CHUNK_BYTES } from "../config/constants";
+import { splitByByteSize } from "../utils/contentChunker";
 import { conf } from "./conf";
 
 const logger = getLogger(["editprompt", "wezterm"]);
@@ -190,9 +192,17 @@ export async function sendKeyToWeztermPane(
 }
 
 export async function inputToWeztermPane(paneId: string, content: string): Promise<void> {
-  // Send content using wezterm cli send-text command (no focus change)
-  await execAsync(
-    `wezterm cli send-text --no-paste --pane-id '${paneId}' -- '${content.replace(/'/g, "'\\''")}'`,
-  );
-  logger.debug("Content sent to wezterm pane: {paneId}", { paneId });
+  // Split long content into chunks and send each in order (no focus change),
+  // mirroring the tmux backend. The --auto-send Enter is sent separately by the
+  // caller after all chunks, so it fires only once.
+  const chunks = splitByByteSize(content, WEZTERM_SEND_CHUNK_BYTES);
+  for (const chunk of chunks) {
+    await execAsync(
+      `wezterm cli send-text --no-paste --pane-id '${paneId}' -- '${chunk.replace(/'/g, "'\\''")}'`,
+    );
+  }
+  logger.debug("Content sent to wezterm pane: {paneId} ({chunks} chunk(s))", {
+    paneId,
+    chunks: chunks.length,
+  });
 }
