@@ -1,6 +1,8 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { getLogger } from "@logtape/logtape";
+import { TMUX_SEND_CHUNK_BYTES } from "../config/constants";
+import { splitByByteSize } from "../utils/contentChunker";
 
 const execAsync = promisify(exec);
 const logger = getLogger(["editprompt", "tmux"]);
@@ -127,7 +129,15 @@ export async function inputToTmuxPane(paneId: string, content: string): Promise<
     `tmux if-shell -t '${paneId}' '[ "#{pane_in_mode}" = "1" ]' "copy-mode -q -t '${paneId}'"`,
   );
 
-  // Send content using send-keys command (no focus change)
-  await execAsync(`tmux send-keys -t '${paneId}' -- '${content.replace(/'/g, "'\\''")}'`);
-  logger.debug("Content sent to tmux pane: {paneId}", { paneId });
+  // Split long content into chunks to stay under tmux's imsg frame limit,
+  // then send each chunk in order (no focus change). The --auto-send Enter is
+  // sent separately by the caller after all chunks, so it fires only once.
+  const chunks = splitByByteSize(content, TMUX_SEND_CHUNK_BYTES);
+  for (const chunk of chunks) {
+    await execAsync(`tmux send-keys -t '${paneId}' -- '${chunk.replace(/'/g, "'\\''")}'`);
+  }
+  logger.debug("Content sent to tmux pane: {paneId} ({chunks} chunk(s))", {
+    paneId,
+    chunks: chunks.length,
+  });
 }
