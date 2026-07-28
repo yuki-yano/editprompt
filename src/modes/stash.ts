@@ -1,6 +1,7 @@
 import { getLogger } from "@logtape/logtape";
 import { define } from "gunshi";
 import { conf } from "../modules/conf";
+import * as herdr from "../modules/herdr";
 import { setupLogger } from "../modules/logger";
 import { getCurrentPaneId, getTargetPaneIds, isEditorPane } from "../modules/tmux";
 import * as wezterm from "../modules/wezterm";
@@ -13,7 +14,8 @@ const logger = getLogger(["editprompt", "stash"]);
 
 // Stash storage key helper
 function getStashKey(mux: MuxType, targetPaneId: string): string {
-  return `${mux}.targetPane.pane_${targetPaneId}.stash`;
+  const namespace = mux === "herdr" ? herdr.getStorageNamespace() : mux;
+  return `${namespace}.targetPane.pane_${targetPaneId}.stash`;
 }
 
 // Stash data type
@@ -105,9 +107,12 @@ async function getTargetPaneForStash(): Promise<{
   if (config.mux === "tmux") {
     currentPaneId = await getCurrentPaneId();
     isEditor = await isEditorPane(currentPaneId);
-  } else {
+  } else if (config.mux === "wezterm") {
     currentPaneId = await wezterm.getCurrentPaneId();
     isEditor = wezterm.isEditorPaneFromConf(currentPaneId);
+  } else {
+    currentPaneId = await herdr.getCurrentPaneId();
+    isEditor = herdr.isEditorPaneFromConf(currentPaneId);
   }
 
   if (!isEditor) {
@@ -119,8 +124,10 @@ async function getTargetPaneForStash(): Promise<{
   let targetPanes: string[];
   if (config.mux === "tmux") {
     targetPanes = await getTargetPaneIds(currentPaneId);
-  } else {
+  } else if (config.mux === "wezterm") {
     targetPanes = await wezterm.getTargetPaneIds(currentPaneId);
+  } else {
+    targetPanes = await herdr.getTargetPaneIds(currentPaneId);
   }
 
   if (targetPanes.length === 0) {

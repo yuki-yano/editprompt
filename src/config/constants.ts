@@ -14,3 +14,11 @@ export const TMUX_SEND_CHUNK_BYTES = TMUX_IMSG_LIMIT_BYTES / 2;
 // ARG_MAX (typically 256KB+) rather than imsg, so it has more headroom. Reuse
 // the same chunk size for simplicity and consistency.
 export const WEZTERM_SEND_CHUNK_BYTES = TMUX_SEND_CHUNK_BYTES;
+
+// Herdr v0.7.5's src/api/server.rs defines MAX_INITIAL_REQUEST_BYTES as 1MB
+// for the initial newline-delimited JSON request.
+// A control character can expand from one byte to six bytes when JSON-encoded,
+// so use one eighth of that limit for text and leave room for the request
+// envelope.
+const HERDR_REQUEST_LIMIT_BYTES = 1024 * 1024;
+export const HERDR_SEND_CHUNK_BYTES = HERDR_REQUEST_LIMIT_BYTES / 8;

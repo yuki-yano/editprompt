@@ -1,5 +1,6 @@
 import { getLogger } from "@logtape/logtape";
 import { define } from "gunshi";
+import * as herdr from "../modules/herdr";
 import { setupLogger } from "../modules/logger";
 import {
   clearQuoteVariable,
@@ -26,9 +27,12 @@ export async function runDumpMode(): Promise<void> {
     if (config.mux === "tmux") {
       currentPaneId = await getCurrentPaneId();
       isEditor = await isEditorPane(currentPaneId);
-    } else {
+    } else if (config.mux === "wezterm") {
       currentPaneId = await wezterm.getCurrentPaneId();
       isEditor = wezterm.isEditorPaneFromConf(currentPaneId);
+    } else {
+      currentPaneId = await herdr.getCurrentPaneId();
+      isEditor = herdr.isEditorPaneFromConf(currentPaneId);
     }
 
     if (!isEditor) {
@@ -40,8 +44,10 @@ export async function runDumpMode(): Promise<void> {
     let targetPanes: string[];
     if (config.mux === "tmux") {
       targetPanes = await getTargetPaneIds(currentPaneId);
-    } else {
+    } else if (config.mux === "wezterm") {
       targetPanes = await wezterm.getTargetPaneIds(currentPaneId);
+    } else {
+      targetPanes = await herdr.getTargetPaneIds(currentPaneId);
     }
 
     if (targetPanes.length === 0) {
@@ -56,9 +62,12 @@ export async function runDumpMode(): Promise<void> {
       if (config.mux === "tmux") {
         content = await getQuoteVariableContent(targetPane);
         await clearQuoteVariable(targetPane);
-      } else {
+      } else if (config.mux === "wezterm") {
         content = await wezterm.getQuoteText(targetPane);
         await wezterm.clearQuoteText(targetPane);
+      } else {
+        content = await herdr.getQuoteText(targetPane);
+        await herdr.clearQuoteText(targetPane);
       }
       if (content.trim() !== "") {
         quoteContents.push(content);

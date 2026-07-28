@@ -11,6 +11,7 @@ import { registerCommand } from "./modes/register";
 import { resumeCommand } from "./modes/resume";
 import { pressCommand } from "./modes/press";
 import { stashCommand } from "./modes/stash";
+import { toggleCommand } from "./modes/toggle";
 
 const argv = process.argv.slice(2);
 
@@ -45,6 +46,7 @@ await cli(
       open: openCommand,
       register: registerCommand,
       resume: resumeCommand,
+      toggle: toggleCommand,
       input: inputCommand,
       press: pressCommand,
       collect: collectCommand,

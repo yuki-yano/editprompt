@@ -1,5 +1,6 @@
 import { getLogger } from "@logtape/logtape";
 import { define } from "gunshi";
+import { appendToQuoteText as appendToHerdrQuoteText } from "../modules/herdr";
 import { appendToQuoteVariable } from "../modules/tmux";
 import { appendToQuoteText } from "../modules/wezterm";
 import { extractRawContent } from "../utils/argumentParser";
@@ -92,6 +93,8 @@ export async function runCollectMode(
           await appendToQuoteVariable(targetPaneId, processedText);
         } else if (mux === "wezterm") {
           await appendToQuoteText(targetPaneId, processedText);
+        } else {
+          await appendToHerdrQuoteText(targetPaneId, processedText);
         }
       } else if (output === "stdout") {
         process.stdout.write(processedText);
@@ -126,14 +129,14 @@ export const collectCommand = define({
     const outputs = normalizeCollectOutputs(ctx.values.output);
     const withQuote = !ctx.values["no-quote"];
 
-    // For wezterm, content must be provided as argument
+    // For WezTerm and Herdr, content must be provided as an argument.
     // For tmux, content is read from stdin
     let rawContent: string | undefined;
-    if (mux === "wezterm") {
+    if (mux === "wezterm" || mux === "herdr") {
       rawContent = extractRawContent(ctx.rest, ctx.positionals);
       if (rawContent === undefined) {
         logger.error(
-          'Text content is required for collect mode with wezterm. Use: editprompt collect --mux wezterm --target-pane <id> -- "<text>"',
+          `Text content is required for collect mode with ${mux}. Use: editprompt collect --mux ${mux} --target-pane <id> -- "<text>"`,
         );
         process.exit(1);
       }

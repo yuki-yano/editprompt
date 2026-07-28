@@ -1,0 +1,382 @@
+import { createHash } from "node:crypto";
+import { createConnection } from "node:net";
+import { getLogger } from "@logtape/logtape";
+import { HERDR_SEND_CHUNK_BYTES } from "../config/constants";
+import { splitByByteSize } from "../utils/contentChunker";
+import { conf } from "./conf";
+
+const logger = getLogger(["editprompt", "herdr"]);
+const HERDR_REQUEST_TIMEOUT_MS = 6_000;
+let requestSequence = 0;
+
+interface HerdrError {
+  code: string;
+  message: string;
+}
+
+interface HerdrResponse {
+  id: string;
+  result?: unknown;
+  error?: HerdrError;
+}
+
+interface HerdrPaneLayoutResult {
+  layout?: {
+    panes?: Array<{
+      pane_id?: unknown;
+      rect?: {
+        height?: unknown;
+      };
+    }>;
+  };
+}
+
+interface HerdrPaneInfoResult {
+  pane?: {
+    pane_id?: unknown;
+  };
+}
+
+function getSocketPath(): string {
+  const socketPath = process.env.HERDR_SOCKET_PATH?.trim();
+  if (!socketPath) {
+    throw new Error("HERDR_SOCKET_PATH is not set");
+  }
+  return socketPath;
+}
+
+async function sendRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+  const id = `editprompt_${process.pid}_${++requestSequence}`;
+  const request = `${JSON.stringify({ id, method, params })}\n`;
+
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(getSocketPath());
+    let buffer = "";
+    let settled = false;
+
+    const finish = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.end();
+      callback();
+    };
+
+    socket.setEncoding("utf8");
+    socket.setTimeout(HERDR_REQUEST_TIMEOUT_MS);
+    socket.on("connect", () => {
+      socket.write(request);
+    });
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex === -1) {
+        return;
+      }
+
+      const line = buffer.slice(0, newlineIndex);
+      let response: HerdrResponse;
+      try {
+        response = JSON.parse(line) as HerdrResponse;
+      } catch (error) {
+        finish(() => {
+          reject(
+            new Error(
+              `Invalid response from Herdr: ${error instanceof Error ? error.message : "Unknown error"}`,
+            ),
+          );
+        });
+        return;
+      }
+
+      if (response.id !== id) {
+        finish(() => {
+          reject(new Error(`Unexpected response ID from Herdr: ${response.id}`));
+        });
+        return;
+      }
+      if (response.error) {
+        finish(() => {
+          reject(new Error(`Herdr ${response.error?.code}: ${response.error?.message}`));
+        });
+        return;
+      }
+
+      finish(() => {
+        resolve(response.result);
+      });
+    });
+    socket.on("error", (error) => {
+      finish(() => {
+        reject(new Error(`Failed to communicate with Herdr: ${error.message}`));
+      });
+    });
+    socket.on("timeout", () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      reject(new Error(`Timed out waiting for Herdr response after ${HERDR_REQUEST_TIMEOUT_MS}ms`));
+    });
+    socket.on("end", () => {
+      if (!settled) {
+        finish(() => {
+          reject(new Error("Herdr closed the socket before sending a response"));
+        });
+      }
+    });
+  });
+}
+
+export function getStorageNamespace(): string {
+  const sessionHash = createHash("sha256").update(getSocketPath()).digest("hex").slice(0, 16);
+  return `herdr.session_${sessionHash}`;
+}
+
+function targetPaneKey(paneId: string): string {
+  return `${getStorageNamespace()}.targetPane.pane_${paneId}`;
+}
+
+function editorPaneKey(paneId: string): string {
+  return `${getStorageNamespace()}.editorPane.pane_${paneId}`;
+}
+
+export async function getCurrentPaneId(): Promise<string> {
+  const paneId = process.env.HERDR_PANE_ID?.trim() || process.env.HERDR_ACTIVE_PANE_ID?.trim();
+  if (!paneId) {
+    throw new Error("HERDR_PANE_ID or HERDR_ACTIVE_PANE_ID is not set");
+  }
+  return paneId;
+}
+
+export async function checkPaneExists(paneId: string): Promise<boolean> {
+  try {
+    await sendRequest("pane.get", { pane_id: paneId });
+    return true;
+  } catch (error) {
+    logger.debug("checkPaneExists failed: {error}", { error });
+    return false;
+  }
+}
+
+export async function focusPane(paneId: string): Promise<void> {
+  await sendRequest("pane.focus", { pane_id: paneId });
+}
+
+export function calculateEditorSplitRatio(paneHeight: number, editorPaneRows: number): number {
+  if (!Number.isInteger(paneHeight) || paneHeight <= 1) {
+    throw new Error(`Invalid Herdr pane height: ${paneHeight}`);
+  }
+  if (!Number.isInteger(editorPaneRows) || editorPaneRows <= 0) {
+    throw new Error(`Invalid Herdr editor pane rows: ${editorPaneRows}`);
+  }
+
+  return Math.min(0.9, Math.max(0.1, 1 - editorPaneRows / paneHeight));
+}
+
+export async function splitEditorPane(
+  targetPaneId: string,
+  editorPaneRows: number,
+  cwd?: string,
+  env: Record<string, string> = {},
+): Promise<string> {
+  const layoutResult = (await sendRequest("pane.layout", {
+    pane_id: targetPaneId,
+  })) as HerdrPaneLayoutResult;
+  const targetPane = layoutResult.layout?.panes?.find((pane) => pane.pane_id === targetPaneId);
+  const paneHeight = targetPane?.rect?.height;
+  if (typeof paneHeight !== "number") {
+    throw new Error(`Herdr pane.layout did not return a height for pane ${targetPaneId}`);
+  }
+
+  const ratio = calculateEditorSplitRatio(paneHeight, editorPaneRows);
+  const params: Record<string, unknown> = {
+    target_pane_id: targetPaneId,
+    direction: "down",
+    ratio,
+    focus: true,
+    env,
+  };
+  if (cwd?.trim()) {
+    params.cwd = cwd;
+  }
+
+  const splitResult = (await sendRequest("pane.split", params)) as HerdrPaneInfoResult;
+  const editorPaneId = splitResult.pane?.pane_id;
+  if (typeof editorPaneId !== "string" || editorPaneId === "") {
+    throw new Error("Herdr pane.split did not return the new pane ID");
+  }
+  return editorPaneId;
+}
+
+function quoteShellWord(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+export async function runCommandInPane(paneId: string, argv: string[]): Promise<void> {
+  if (argv.length === 0) {
+    throw new Error("Cannot run an empty command in a Herdr pane");
+  }
+  const command = `exec ${argv.map(quoteShellWord).join(" ")}`;
+  await sendRequest("pane.send_input", {
+    pane_id: paneId,
+    text: command,
+    keys: ["Enter"],
+  });
+}
+
+export async function closePane(paneId: string): Promise<void> {
+  await sendRequest("pane.close", { pane_id: paneId });
+}
+
+export async function inputToHerdrPane(paneId: string, content: string): Promise<void> {
+  const chunks = splitByByteSize(content, HERDR_SEND_CHUNK_BYTES);
+  for (const chunk of chunks) {
+    await sendRequest("pane.send_text", { pane_id: paneId, text: chunk });
+  }
+  logger.debug("Content sent to Herdr pane: {paneId} ({chunkCount} chunks)", {
+    paneId,
+    chunkCount: chunks.length,
+  });
+}
+
+export async function sendKeyToHerdrPane(paneId: string, key: string, delay = 1000): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, delay));
+  await sendRequest("pane.send_keys", { pane_id: paneId, keys: [key] });
+}
+
+export async function saveEditorPaneId(targetPaneId: string, editorPaneId: string): Promise<void> {
+  const data = conf.get(targetPaneKey(targetPaneId));
+  const existing = typeof data === "object" && data !== null ? data : {};
+  conf.set(targetPaneKey(targetPaneId), {
+    ...existing,
+    editorPaneId,
+  });
+}
+
+export async function getEditorPaneId(targetPaneId: string): Promise<string> {
+  const data = conf.get(targetPaneKey(targetPaneId));
+  if (typeof data === "object" && data !== null && "editorPaneId" in data) {
+    return String(data.editorPaneId);
+  }
+  return "";
+}
+
+export async function clearEditorPaneId(
+  targetPaneId: string,
+  expectedEditorPaneId?: string,
+): Promise<void> {
+  const editorPaneId = await getEditorPaneId(targetPaneId);
+  if (expectedEditorPaneId && editorPaneId !== expectedEditorPaneId) {
+    conf.delete(editorPaneKey(expectedEditorPaneId));
+    return;
+  }
+
+  const data = conf.get(targetPaneKey(targetPaneId));
+  if (typeof data === "object" && data !== null && "editorPaneId" in data) {
+    const { editorPaneId: _, ...remaining } = data;
+    if (Object.keys(remaining).length === 0) {
+      conf.delete(targetPaneKey(targetPaneId));
+    } else {
+      conf.set(targetPaneKey(targetPaneId), remaining);
+    }
+  }
+  if (editorPaneId) {
+    conf.delete(editorPaneKey(editorPaneId));
+  }
+}
+
+export async function markAsEditorPane(
+  editorPaneId: string,
+  targetPaneIds: string[],
+): Promise<void> {
+  const uniqueTargetPaneIds = [...new Set(targetPaneIds)];
+  conf.set(editorPaneKey(editorPaneId), {
+    targetPaneIds: uniqueTargetPaneIds,
+  });
+  for (const targetPaneId of uniqueTargetPaneIds) {
+    await saveEditorPaneId(targetPaneId, editorPaneId);
+  }
+}
+
+export async function getTargetPaneIds(editorPaneId: string): Promise<string[]> {
+  const data = conf.get(editorPaneKey(editorPaneId));
+  if (typeof data === "object" && data !== null && "targetPaneIds" in data) {
+    const targetPaneIds = data.targetPaneIds;
+    if (Array.isArray(targetPaneIds)) {
+      return targetPaneIds.map((id) => String(id));
+    }
+  }
+  return [];
+}
+
+export function isEditorPaneFromConf(paneId: string): boolean {
+  return conf.has(editorPaneKey(paneId));
+}
+
+export async function resumeEditorPane(targetPaneId: string): Promise<boolean> {
+  const currentPaneId = await getCurrentPaneId();
+  const editorPaneId = isEditorPaneFromConf(currentPaneId)
+    ? currentPaneId
+    : isEditorPaneFromConf(targetPaneId)
+      ? targetPaneId
+      : "";
+
+  if (editorPaneId) {
+    const targetPaneIds = await getTargetPaneIds(editorPaneId);
+    for (const paneId of targetPaneIds) {
+      if (await checkPaneExists(paneId)) {
+        await focusPane(paneId);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const registeredEditorPaneId = await getEditorPaneId(targetPaneId);
+  if (registeredEditorPaneId === "") {
+    return false;
+  }
+  if (!(await checkPaneExists(registeredEditorPaneId))) {
+    await clearEditorPaneId(targetPaneId);
+    return false;
+  }
+
+  await focusPane(registeredEditorPaneId);
+  return true;
+}
+
+export async function appendToQuoteText(paneId: string, content: string): Promise<void> {
+  const data = conf.get(targetPaneKey(paneId));
+  const existing = typeof data === "object" && data !== null ? data : {};
+  const existingQuoteText = "quote_text" in existing ? String(existing.quote_text) : "";
+  const quoteText =
+    existingQuoteText.trim() !== "" ? `${existingQuoteText}\n\n${content}` : content;
+
+  conf.set(targetPaneKey(paneId), {
+    ...existing,
+    quote_text: quoteText,
+  });
+}
+
+export async function getQuoteText(paneId: string): Promise<string> {
+  const data = conf.get(targetPaneKey(paneId));
+  if (typeof data === "object" && data !== null && "quote_text" in data) {
+    return String(data.quote_text);
+  }
+  return "";
+}
+
+export async function clearQuoteText(paneId: string): Promise<void> {
+  const data = conf.get(targetPaneKey(paneId));
+  if (typeof data === "object" && data !== null && "quote_text" in data) {
+    const { quote_text: _, ...remaining } = data;
+    if (Object.keys(remaining).length === 0) {
+      conf.delete(targetPaneKey(paneId));
+    } else {
+      conf.set(targetPaneKey(paneId), remaining);
+    }
+  }
+}

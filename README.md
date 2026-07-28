@@ -22,7 +22,7 @@ A CLI tool that lets you write prompts for CLI tools using your favorite text ed
 ## ✨ Features
 
 - 🖊️ **Editor Integration**: Use your preferred text editor to write prompts
-- 🖥️ **Multiplexer Support**: Send prompts directly to tmux or WezTerm sessions
+- 🖥️ **Multiplexer Support**: Send prompts directly to tmux, WezTerm, or Herdr sessions
 - 🖥️ **Universal Terminal Support**: Works with any terminal via clipboard - no multiplexer required
 - 📤 **Send Without Closing**: Iterate on prompts without closing your editor
 - 📋 **Quote Buffering**: Collect text selections and send them as quoted replies
@@ -88,7 +88,7 @@ Ideal for trial-and-error workflows with AI assistants.
 
 For replying to specific parts of AI responses:
 
-1. Select text in your terminal (tmux copy mode or WezTerm selection) and trigger collect mode
+1. Select text in your terminal and trigger collect mode
 2. Repeat to collect multiple selections
 3. Run `editprompt dump` to retrieve all collected quotes
 4. Edit and send your reply with context
@@ -169,6 +169,24 @@ bind -n M-q run-shell '\
 
 **Note:** The `-lc` flag ensures your shell loads the full login environment, making `editprompt` available in your PATH.
 
+### Herdr Integration
+
+Herdr v0.7.5 or later exposes the pane environment and socket API used by editprompt. Add a custom command to `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+e"
+type = "shell"
+command = 'editprompt toggle --mux herdr --target-pane "$HERDR_ACTIVE_PANE_ID" --editor nvim --always-copy --pane-rows 12'
+description = "open prompt editor"
+```
+
+Run the binding from a target pane. editprompt opens a regular bottom split for the editor; after content is sent, it focuses the target pane again. If an editor pane is already registered, the command focuses that pane instead. Run the same binding from the editor pane to return to the first available target pane without sending content.
+
+`--pane-rows` sets the desired editor height. Herdr limits split ratios to 10–90%, so editprompt uses the requested row count when possible and clamps it to those limits for very short or tall panes. The editor process replaces the split pane's shell, so the pane closes when the editor exits.
+
+Inside a Herdr pane, editprompt automatically selects the Herdr backend when `HERDR_SOCKET_PATH` and a pane ID are available. An explicit `--mux` option or `EDITPROMPT_MUX` value takes precedence, so the binding above keeps `--mux herdr` to make its intent clear.
+
 ### Editor Integration (Send Without Closing)
 
 While editprompt is running, you can send content to the target pane or clipboard without closing the editor. This allows you to iterate quickly on your prompts.
@@ -186,7 +204,8 @@ editprompt input --auto-send -- "your content here"
 
 editprompt input --auto-send --send-key "C-m" -- "your content here"
 # Customize the key to send after content (tmux format example)
-# WezTerm example: --send-key "\r" (default for WezTerm is \r, tmux default is Enter)
+# WezTerm example: --send-key "\r"
+# Herdr example: --send-key "enter"
 ```
 
 This sends the content to the target pane (or clipboard) while keeping your editor open, so you can continue editing and send multiple times.
@@ -197,6 +216,7 @@ This sends the content to the target pane (or clipboard) while keeping your edit
 - `--send-key <key>`: Customize the key to send after content (requires `--auto-send`)
   - tmux format: `Enter` (default), `C-a`, etc.
   - WezTerm format: `\r` (default), `\x01`, etc.
+  - Herdr format: `enter` (default), `ctrl+a`, etc.
 
 #### Neovim Integration
 
@@ -210,11 +230,15 @@ Send individual key inputs to the target pane without leaving your editor. Usefu
 # Send a character key
 editprompt press -- 1
 
-# Send special keys (tmux format)
+# Send special keys (tmux examples)
 editprompt press -- Tab
 editprompt press -- Up
 editprompt press -- C-m    # Enter
 editprompt press -- C-c    # Ctrl+C
+
+# Herdr examples
+editprompt press -- enter
+editprompt press -- ctrl+c
 
 # Send with delay
 editprompt press --delay 500 -- Tab
@@ -228,12 +252,12 @@ editprompt press --delay 500 -- Tab
 
 **Key notation** depends on your multiplexer:
 
-| Key           | tmux          | WezTerm             |
-| ------------- | ------------- | ------------------- |
-| Enter         | `C-m`         | `\r`                |
-| Tab           | `Tab`         | `\t`                |
-| Escape        | `Escape`      | `\x1b`              |
-| Arrow Up/Down | `Up` / `Down` | `\x1b[A` / `\x1b[B` |
+| Key           | tmux          | WezTerm             | Herdr         |
+| ------------- | ------------- | ------------------- | ------------- |
+| Enter         | `C-m`         | `\r`                | `enter`       |
+| Tab           | `Tab`         | `\t`                | `tab`         |
+| Escape        | `Escape`      | `\x1b`              | `esc`         |
+| Arrow Up/Down | `Up` / `Down` | `\x1b[A` / `\x1b[B` | `up` / `down` |
 
 ### Quote Workflow Setup
 
@@ -293,6 +317,16 @@ return {
 3. Repeat to collect multiple quotes
 4. All quotes are stored in a configuration file associated with the target pane
 
+#### Collecting Quotes in Herdr
+
+Pass selected text as an argument together with the target pane ID:
+
+```bash
+editprompt collect --mux herdr --target-pane "$HERDR_PANE_ID" -- "selected text"
+```
+
+This can be called from a script or editor integration that has access to the selected text. Herdr quote buffers are stored in editprompt's configuration, associated with the target pane.
+
 #### Capturing Collected Quotes
 
 Run this command from within your editor pane to retrieve all collected quotes:
@@ -315,6 +349,7 @@ This copies all collected quotes to the clipboard and clears the buffer, ready f
 
 - **tmux**: Quotes are stored in pane variables, automatically cleaned up when the pane closes
 - **WezTerm**: Quotes are stored in a configuration file associated with the pane
+- **Herdr**: Quotes are stored in editprompt's configuration and associated with the pane ID
 - Text is intelligently processed: removes common indentation, handles line breaks smartly
 - Each quote is prefixed with `> ` in markdown quote format
 - Multiple quotes are separated with blank lines

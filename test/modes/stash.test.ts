@@ -30,6 +30,28 @@ describe("pushStash", () => {
     const data = conf.get(`${mux}.targetPane.pane_${targetPaneId}.stash`);
     expect(data).toEqual({ [key1]: content1, [key2]: content2 });
   });
+
+  test("should isolate Herdr stashes between sessions", async () => {
+    const originalSocketPath = process.env.HERDR_SOCKET_PATH;
+    try {
+      process.env.HERDR_SOCKET_PATH = "/tmp/herdr-session-a.sock";
+      await pushStash("herdr", "w1:p1", "session a");
+
+      process.env.HERDR_SOCKET_PATH = "/tmp/herdr-session-b.sock";
+      await pushStash("herdr", "w1:p1", "session b");
+
+      expect(getStashContent("herdr", "w1:p1")).toBe("session b");
+
+      process.env.HERDR_SOCKET_PATH = "/tmp/herdr-session-a.sock";
+      expect(getStashContent("herdr", "w1:p1")).toBe("session a");
+    } finally {
+      if (originalSocketPath === undefined) {
+        delete process.env.HERDR_SOCKET_PATH;
+      } else {
+        process.env.HERDR_SOCKET_PATH = originalSocketPath;
+      }
+    }
+  });
 });
 
 describe("getStashList", () => {

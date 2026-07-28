@@ -1,5 +1,6 @@
 import { getLogger } from "@logtape/logtape";
 import { define } from "gunshi";
+import * as herdr from "../modules/herdr";
 import {
   checkPaneExists,
   clearEditorPaneId,
@@ -25,6 +26,15 @@ import type { MuxType } from "./common";
 const logger = getLogger(["editprompt", "resume"]);
 
 export async function runResumeMode(targetPane: string, mux: MuxType): Promise<void> {
+  if (mux === "herdr") {
+    try {
+      process.exit((await herdr.resumeEditorPane(targetPane)) ? 0 : 1);
+    } catch (error) {
+      logger.debug("Herdr resume failed: {error}", { error });
+      process.exit(1);
+    }
+  }
+
   if (mux === "wezterm") {
     const currentPaneId = await wezterm.getCurrentPaneId();
     const isEditor = wezterm.isEditorPaneFromConf(currentPaneId);

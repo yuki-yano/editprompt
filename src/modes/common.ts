@@ -2,16 +2,12 @@ import { getLogger } from "@logtape/logtape";
 import clipboardy from "clipboardy";
 
 const logger = getLogger(["editprompt", "delivery"]);
+import { focusPane as focusHerdrPane, inputToHerdrPane } from "../modules/herdr";
 import { focusPane as focusTmuxPane, inputToTmuxPane } from "../modules/tmux";
 import { focusPane as focusWeztermPane, inputToWeztermPane } from "../modules/wezterm";
+import type { MuxType } from "../utils/mux";
 
-export type MuxType = "tmux" | "wezterm";
-
-export function isMuxType(value: unknown): value is MuxType {
-  return value === "tmux" || value === "wezterm";
-}
-
-export const SUPPORTED_MUXES: MuxType[] = ["tmux", "wezterm"];
+export type { MuxType } from "../utils/mux";
 
 export interface DeliveryResult {
   successCount: number;
@@ -32,6 +28,8 @@ async function inputContentToPane(
 ): Promise<void> {
   if (mux === "wezterm") {
     await inputToWeztermPane(targetPaneId, content);
+  } else if (mux === "herdr") {
+    await inputToHerdrPane(targetPaneId, content);
   } else {
     await inputToTmuxPane(targetPaneId, content);
   }
@@ -46,8 +44,10 @@ export async function focusFirstSuccessPane(
   if (firstSuccessPane) {
     if (mux === "tmux") {
       await focusTmuxPane(firstSuccessPane);
-    } else {
+    } else if (mux === "wezterm") {
       await focusWeztermPane(firstSuccessPane);
+    } else {
+      await focusHerdrPane(firstSuccessPane);
     }
   }
 }
