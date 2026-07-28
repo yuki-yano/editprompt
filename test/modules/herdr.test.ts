@@ -1,0 +1,335 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { HERDR_SEND_CHUNK_BYTES } from "../../src/config/constants";
+import { conf } from "../../src/modules/conf";
+import {
+  appendToQuoteText,
+  calculateEditorSplitRatio,
+  checkPaneExists,
+  closePane,
+  clearEditorPaneId,
+  clearQuoteText,
+  focusPane,
+  getCurrentPaneId,
+  getEditorPaneId,
+  getQuoteText,
+  getTargetPaneIds,
+  inputToHerdrPane,
+  isEditorPaneFromConf,
+  markAsEditorPane,
+  resumeEditorPane,
+  runCommandInPane,
+  sendKeyToHerdrPane,
+  splitEditorPane,
+} from "../../src/modules/herdr";
+
+interface HerdrRequest {
+  id: string;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+let server: Server | undefined;
+let tempDirectory: string | undefined;
+let originalEnv: NodeJS.ProcessEnv;
+
+async function startServer(
+  handler: (request: HerdrRequest) => Record<string, unknown>,
+): Promise<HerdrRequest[]> {
+  tempDirectory = await mkdtemp(join(tmpdir(), "editprompt-herdr-test-"));
+  const socketPath = join(tempDirectory, "herdr.sock");
+  const requests: HerdrRequest[] = [];
+
+  server = createServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line) {
+          continue;
+        }
+        const request = JSON.parse(line) as HerdrRequest;
+        requests.push(request);
+        socket.write(`${JSON.stringify({ id: request.id, ...handler(request) })}\n`);
+      }
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server?.once("error", reject);
+    server?.listen(socketPath, resolve);
+  });
+  process.env.HERDR_SOCKET_PATH = socketPath;
+  return requests;
+}
+
+beforeEach(() => {
+  originalEnv = { ...process.env };
+  process.env.HERDR_SOCKET_PATH = "/tmp/editprompt-herdr-test.sock";
+  conf.clear();
+});
+
+afterEach(async () => {
+  process.env = originalEnv;
+  if (server) {
+    await new Promise<void>((resolve, reject) => {
+      server?.close((error) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    });
+    server = undefined;
+  }
+  if (tempDirectory) {
+    await rm(tempDirectory, { recursive: true });
+    tempDirectory = undefined;
+  }
+});
+
+describe("Herdr pane API", () => {
+  test("gets the current pane ID from a Herdr pane environment", async () => {
+    process.env.HERDR_PANE_ID = "w1:p2";
+
+    expect(await getCurrentPaneId()).toBe("w1:p2");
+  });
+
+  test("gets the active pane ID from a detached Herdr command", async () => {
+    delete process.env.HERDR_PANE_ID;
+    process.env.HERDR_ACTIVE_PANE_ID = "w1:p3";
+
+    expect(await getCurrentPaneId()).toBe("w1:p3");
+  });
+
+  test("throws when the current pane ID is unavailable", async () => {
+    delete process.env.HERDR_PANE_ID;
+    delete process.env.HERDR_ACTIVE_PANE_ID;
+
+    let thrown: unknown;
+    try {
+      await getCurrentPaneId();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe("HERDR_PANE_ID or HERDR_ACTIVE_PANE_ID is not set");
+  });
+
+  test("checks pane existence through pane.get", async () => {
+    const requests = await startServer(() => ({
+      result: { type: "pane_info", pane: { pane_id: "w1:p2" } },
+    }));
+
+    expect(await checkPaneExists("w1:p2")).toBe(true);
+    expect(requests[0]).toMatchObject({
+      method: "pane.get",
+      params: { pane_id: "w1:p2" },
+    });
+  });
+
+  test("returns false when pane.get returns an error", async () => {
+    await startServer(() => ({
+      error: { code: "pane_not_found", message: "pane not found" },
+    }));
+
+    expect(await checkPaneExists("w1:p9")).toBe(false);
+  });
+
+  test("focuses a pane through pane.focus", async () => {
+    const requests = await startServer(() => ({ result: { type: "pane_info" } }));
+
+    await focusPane("w1:p2");
+
+    expect(requests[0]).toMatchObject({
+      method: "pane.focus",
+      params: { pane_id: "w1:p2" },
+    });
+  });
+
+  test("sends text and keys without shell escaping", async () => {
+    const requests = await startServer(() => ({ result: { type: "ok" } }));
+    const content = "hello 'herdr'\n日本語";
+
+    await inputToHerdrPane("w1:p2", content);
+    await sendKeyToHerdrPane("w1:p2", "enter", 0);
+
+    expect(requests[0]).toMatchObject({
+      method: "pane.send_text",
+      params: { pane_id: "w1:p2", text: content },
+    });
+    expect(requests[1]).toMatchObject({
+      method: "pane.send_keys",
+      params: { pane_id: "w1:p2", keys: ["enter"] },
+    });
+  });
+
+  test("splits text across requests below Herdr's request limit", async () => {
+    const requests = await startServer(() => ({ result: { type: "ok" } }));
+    const content = `先頭${"a".repeat(HERDR_SEND_CHUNK_BYTES)}末尾`;
+
+    await inputToHerdrPane("w1:p2", content);
+
+    expect(requests.length).toBeGreaterThan(1);
+    expect(requests.every((request) => request.method === "pane.send_text")).toBe(true);
+    expect(requests.map((request) => String(request.params.text)).join("")).toBe(content);
+  });
+
+  test("calculates a 12-row editor split within Herdr ratio limits", () => {
+    expect(calculateEditorSplitRatio(65, 12)).toBeCloseTo(0.815384, 5);
+    expect(calculateEditorSplitRatio(131, 12)).toBe(0.9);
+    expect(calculateEditorSplitRatio(10, 12)).toBe(0.1);
+  });
+
+  test("creates a focused bottom split using the target pane height", async () => {
+    const requests = await startServer((request) => {
+      if (request.method === "pane.layout") {
+        return {
+          result: {
+            type: "pane_layout",
+            layout: {
+              panes: [{ pane_id: "w1:p1", rect: { height: 65 } }],
+            },
+          },
+        };
+      }
+      return {
+        result: {
+          type: "pane_info",
+          pane: { pane_id: "w1:p2" },
+        },
+      };
+    });
+
+    expect(
+      await splitEditorPane("w1:p1", 12, "/repo with spaces", {
+        NODE_NO_WARNINGS: "1",
+      }),
+    ).toBe("w1:p2");
+    expect(requests[0]).toMatchObject({
+      method: "pane.layout",
+      params: { pane_id: "w1:p1" },
+    });
+    expect(requests[1]).toMatchObject({
+      method: "pane.split",
+      params: {
+        target_pane_id: "w1:p1",
+        direction: "down",
+        ratio: 1 - 12 / 65,
+        focus: true,
+        cwd: "/repo with spaces",
+        env: { NODE_NO_WARNINGS: "1" },
+      },
+    });
+  });
+
+  test("runs an argv command safely and closes panes through the socket API", async () => {
+    const requests = await startServer(() => ({ result: { type: "ok" } }));
+
+    await runCommandInPane("w1:p2", [
+      "node",
+      "/repo with spaces/dist/index.js",
+      "--env",
+      "VALUE=it's safe",
+    ]);
+    await closePane("w1:p2");
+
+    expect(requests[0]).toMatchObject({
+      method: "pane.send_input",
+      params: {
+        pane_id: "w1:p2",
+        text: "exec 'node' '/repo with spaces/dist/index.js' '--env' 'VALUE=it'\\''s safe'",
+        keys: ["Enter"],
+      },
+    });
+    expect(requests[1]).toMatchObject({
+      method: "pane.close",
+      params: { pane_id: "w1:p2" },
+    });
+  });
+});
+
+describe("Herdr editor state", () => {
+  test("registers an editor pane with unique target panes", async () => {
+    await markAsEditorPane("w1:p3", ["w1:p1", "w1:p2", "w1:p1"]);
+
+    expect(isEditorPaneFromConf("w1:p3")).toBe(true);
+    expect(await getTargetPaneIds("w1:p3")).toEqual(["w1:p1", "w1:p2"]);
+    expect(await getEditorPaneId("w1:p1")).toBe("w1:p3");
+    expect(await getEditorPaneId("w1:p2")).toBe("w1:p3");
+  });
+
+  test("clears editor state while preserving quote text", async () => {
+    await markAsEditorPane("w1:p3", ["w1:p1"]);
+    await appendToQuoteText("w1:p1", "> quote\n\n");
+
+    await clearEditorPaneId("w1:p1");
+
+    expect(isEditorPaneFromConf("w1:p3")).toBe(false);
+    expect(await getEditorPaneId("w1:p1")).toBe("");
+    expect(await getQuoteText("w1:p1")).toBe("> quote\n\n");
+  });
+
+  test("does not clear a newer editor registration when an older editor exits", async () => {
+    await markAsEditorPane("w1:p2", ["w1:p1"]);
+    await markAsEditorPane("w1:p3", ["w1:p1"]);
+
+    await clearEditorPaneId("w1:p1", "w1:p2");
+
+    expect(isEditorPaneFromConf("w1:p2")).toBe(false);
+    expect(isEditorPaneFromConf("w1:p3")).toBe(true);
+    expect(await getEditorPaneId("w1:p1")).toBe("w1:p3");
+  });
+
+  test("appends and clears quote text while preserving editor state", async () => {
+    await markAsEditorPane("w1:p3", ["w1:p1"]);
+
+    await appendToQuoteText("w1:p1", "> first\n\n");
+    await appendToQuoteText("w1:p1", "> second\n\n");
+
+    expect(await getQuoteText("w1:p1")).toBe("> first\n\n\n\n> second\n\n");
+
+    await clearQuoteText("w1:p1");
+
+    expect(await getQuoteText("w1:p1")).toBe("");
+    expect(await getEditorPaneId("w1:p1")).toBe("w1:p3");
+  });
+
+  test("isolates editor state between Herdr sessions", async () => {
+    process.env.HERDR_SOCKET_PATH = "/tmp/herdr-session-a.sock";
+    await markAsEditorPane("w1:p3", ["w1:p1"]);
+
+    process.env.HERDR_SOCKET_PATH = "/tmp/herdr-session-b.sock";
+
+    expect(isEditorPaneFromConf("w1:p3")).toBe(false);
+    expect(await getEditorPaneId("w1:p1")).toBe("");
+  });
+
+  test("resumes a registered editor pane from its target pane", async () => {
+    process.env.HERDR_PANE_ID = "w1:p1";
+    const requests = await startServer((request) => {
+      if (request.method === "pane.get") {
+        return { result: { type: "pane_info", pane: { pane_id: "w1:p2" } } };
+      }
+      return { result: { type: "ok" } };
+    });
+    await markAsEditorPane("w1:p2", ["w1:p1"]);
+
+    expect(await resumeEditorPane("w1:p1")).toBe(true);
+    expect(requests.map((request) => request.method)).toEqual(["pane.get", "pane.focus"]);
+    expect(requests[1]?.params).toEqual({ pane_id: "w1:p2" });
+  });
+
+  test("returns false when no editor pane is registered", async () => {
+    process.env.HERDR_PANE_ID = "w1:p1";
+
+    expect(await resumeEditorPane("w1:p1")).toBe(false);
+  });
+});
