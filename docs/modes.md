@@ -96,6 +96,7 @@ editprompt register --editor-pane %10 --target-pane %1 --target-pane %2
 3. **Save relationship**:
    - **tmux**: Save as comma-separated values in `@editprompt_target_panes` pane variable
    - **WezTerm**: Save `targetPaneIds` as an array using Conf library
+   - **Herdr**: Save `targetPaneIds` as an array using Conf library
 
 ---
 
@@ -155,6 +156,20 @@ When switching back from the editor pane, it focuses on the first existing targe
 
 This approach enables bidirectional focus switching in WezTerm, similar to tmux.
 
+#### Herdr Implementation
+
+- **Pane discovery**: Uses `HERDR_PANE_ID` inside panes and `HERDR_ACTIVE_PANE_ID` in detached custom commands
+- **Pane control**: Uses Herdr's newline-delimited JSON socket API through `HERDR_SOCKET_PATH`
+- **Editor launch**: `toggle` focuses an existing editor or creates a regular bottom split sized with `--pane-rows`
+  - Herdr split ratios are clamped to 10–90%, so the requested row count is approximated outside that range
+  - The split shell is replaced with `editprompt open`, so the pane closes when the editor exits
+- **State storage**: Uses Conf because Herdr pane metadata is not an editprompt-owned key/value store
+  - State is namespaced by a hash of `HERDR_SOCKET_PATH` to isolate named sessions
+  - `herdr.session_${hash}.targetPane.pane_${targetPaneId}`: Stores the editor pane ID
+  - `herdr.session_${hash}.editorPane.pane_${editorPaneId}`: Stores target pane IDs
+- **Focus switching**: Uses `pane.get` to validate a pane and `pane.focus` to focus it
+  - Herdr custom commands run detached, so `toggle` uses `HERDR_ACTIVE_PANE_ID` to switch between the editor and its first available target pane
+
 ---
 
 ## input Subcommand
@@ -171,12 +186,13 @@ This mode is designed to be executed from within the editor, reading configurati
 
 1. **When launching the editor in open subcommand**:
    - The following environment variables are set when launching the editor:
-     - `EDITPROMPT_MUX`: Multiplexer to use (`tmux` or `wezterm`)
+     - `EDITPROMPT_MUX`: Multiplexer to use (`tmux`, `wezterm`, or `herdr`)
      - `EDITPROMPT_ALWAYS_COPY`: Clipboard copy configuration
      - `EDITPROMPT=1`: Flag indicating launched by editprompt
    - Target pane IDs are stored in pane variables or Conf:
      - tmux: `@editprompt_target_panes` (comma-separated)
      - wezterm: `targetPaneIds` (array)
+     - herdr: `targetPaneIds` (array)
 
 2. **When executing input subcommand from within the editor**:
    - Execute `editprompt input -- "content"` from editors like Neovim
@@ -215,26 +231,26 @@ This mode shares the same editor pane verification and target pane discovery as 
 
 #### Workflow
 
-1. **Read environment variables**: Gets multiplexer type from `EDITPROMPT_MUX`
+1. **Resolve the multiplexer**: Uses `EDITPROMPT_MUX`, then detects Herdr from `HERDR_SOCKET_PATH` and the pane environment, and otherwise defaults to tmux
 2. **Get current pane ID**: Identifies the editor pane
 3. **Verify editor pane**: Checks that the current pane is registered as an editor pane
-4. **Get target pane IDs**: Retrieves target panes from pane variables (tmux) or Conf (WezTerm)
-5. **Send key**: Sends the specified key to each target pane using `sendKeyToTmuxPane` or `sendKeyToWeztermPane`
+4. **Get target pane IDs**: Retrieves target panes from pane variables (tmux) or Conf (WezTerm/Herdr)
+5. **Send key**: Sends the specified key to each target pane using the selected multiplexer backend
 6. **No focus change**: Focus remains on the editor pane
 
 #### Key Notation
 
 Keys are passed directly to the multiplexer's key-sending mechanism. The notation differs by multiplexer:
 
-| Key        | tmux     | WezTerm  |
-| ---------- | -------- | -------- |
-| Enter      | `C-m`    | `\r`     |
-| Tab        | `Tab`    | `\t`     |
-| Escape     | `Escape` | `\x1b`   |
-| Arrow Up   | `Up`     | `\x1b[A` |
-| Arrow Down | `Down`   | `\x1b[B` |
-| Ctrl+C     | `C-c`    | `\x03`   |
-| Character  | `1`, `a` | `1`, `a` |
+| Key        | tmux     | WezTerm  | Herdr    |
+| ---------- | -------- | -------- | -------- |
+| Enter      | `C-m`    | `\r`     | `enter`  |
+| Tab        | `Tab`    | `\t`     | `tab`    |
+| Escape     | `Escape` | `\x1b`   | `esc`    |
+| Arrow Up   | `Up`     | `\x1b[A` | `up`     |
+| Arrow Down | `Down`   | `\x1b[B` | `down`   |
+| Ctrl+C     | `C-c`    | `\x03`   | `ctrl+c` |
+| Character  | `1`, `a` | `1`, `a` | `1`, `a` |
 
 #### Usage
 
@@ -295,6 +311,11 @@ This mode enables collecting multiple text selections while reading AI responses
 - Example: `editprompt collect --mux wezterm --target-pane <id> -- "<text>"`
 - Uses `wezterm.shell_quote_arg()` for proper escaping
 
+**Herdr Implementation:**
+
+- Receives text as a positional argument
+- Example: `editprompt collect --mux herdr --target-pane <id> -- "<text>"`
+
 #### Text Processing
 
 The `processQuoteText` function applies intelligent text formatting:
@@ -312,7 +333,7 @@ The `processQuoteText` function applies intelligent text formatting:
 
 #### Output Destinations
 
-- Default: `--output buffer` (store in tmux pane variable / WezTerm Conf)
+- Default: `--output buffer` (store in tmux pane variable or WezTerm/Herdr Conf)
 - Tee to stdout: `--output buffer --output stdout` to pipe the same processed text to another command (e.g., clipboard)
 - `--no-quote` applies to all outputs, producing cleaned text without Markdown quote prefix or trailing blank lines
 
@@ -341,6 +362,10 @@ const newQuotes = existingQuotes + "\n" + content;
 conf.set(`wezterm.targetPane.pane_${paneId}.quote_text`, newQuotes);
 ```
 
+**Herdr Implementation:**
+
+- Uses the same Conf-backed representation under the session-scoped `herdr.session_${hash}.targetPane.pane_${paneId}.quote_text`
+
 ### Benefits
 
 - Collect multiple selections from long AI responses or terminal output
@@ -364,10 +389,11 @@ This mode is designed to work with the collect subcommand workflow, retrieving a
 
 Unlike collect subcommand which requires `--target-pane` argument, dump subcommand reads configuration from environment variables and pane variables/Conf:
 
-- `EDITPROMPT_MUX`: Multiplexer type (`tmux` or `wezterm`)
+- `EDITPROMPT_MUX`: Multiplexer type (`tmux`, `wezterm`, or `herdr`)
 - Multiple target pane IDs retrieved from current pane ID:
   - tmux: `@editprompt_target_panes` (comma-separated)
   - wezterm: `targetPaneIds` (array)
+  - herdr: `targetPaneIds` (array)
 
 These configurations are automatically set when launching the editor in open subcommand.
 
@@ -379,9 +405,11 @@ These configurations are automatically set when launching the editor in open sub
 4. **Retrieve quote content**: Fetches accumulated quotes from all target panes
    - **tmux**: Reads from `@editprompt_quote` pane variable
    - **WezTerm**: Reads from `wezterm.targetPane.pane_${paneId}.quote_text` in Conf
+   - **Herdr**: Reads from the session-scoped target pane record in Conf
 5. **Clear storage**: Removes quote content from storage for each target pane after retrieval
    - **tmux**: Sets `@editprompt_quote` to empty string
    - **WezTerm**: Deletes `quote_text` key from Conf
+   - **Herdr**: Deletes `quote_text` key from Conf
 6. **Combine and output**: Joins all quotes with newlines and writes to stdout with trailing newline cleanup (max 2 newlines)
 
 ```typescript
@@ -445,12 +473,16 @@ This command is designed to be executed from within an editor pane launched by e
 
 #### Storage
 
-All stash operations use the Conf library for persistent storage, regardless of multiplexer type (tmux or WezTerm).
+All stash operations use the Conf library for persistent storage, regardless of multiplexer type (tmux, WezTerm, or Herdr).
 
 **Storage Key Structure:**
 
 ```typescript
+// tmux and WezTerm
 `${mux}.targetPane.pane_${targetPaneId}.stash`;
+
+// Herdr (hash is derived from HERDR_SOCKET_PATH)
+`herdr.session_${hash}.targetPane.pane_${targetPaneId}.stash`;
 ```
 
 **Data Structure:**
@@ -465,10 +497,10 @@ All stash operations use the Conf library for persistent storage, regardless of 
 
 #### Workflow
 
-1. **Determine editor pane**: Reads `EDITPROMPT_MUX` environment variable to identify multiplexer type
+1. **Determine editor pane**: Uses `EDITPROMPT_MUX`, then detects Herdr from `HERDR_SOCKET_PATH` and the pane environment, and otherwise defaults to tmux
 2. **Get current pane ID**: Identifies the current pane as the editor pane
 3. **Verify editor pane**: Checks that the current pane is registered as an editor pane
-4. **Get target pane ID**: Retrieves target pane ID from pane variables (tmux) or Conf (WezTerm)
+4. **Get target pane ID**: Retrieves target pane ID from pane variables (tmux) or Conf (WezTerm/Herdr)
 5. **Perform stash operation**: Execute the requested subcommand (push/list/apply/drop/pop)
 
 #### Subcommand Details
