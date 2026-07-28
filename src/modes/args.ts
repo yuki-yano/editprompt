@@ -1,12 +1,12 @@
 import { getLogger } from "@logtape/logtape";
 import type { ArgSchema } from "gunshi";
-import { type MuxType, SUPPORTED_MUXES, isMuxType } from "./common";
+import { type MuxType, resolveMux } from "../utils/mux";
 
 const logger = getLogger(["editprompt"]);
 
 export const ARG_MUX: ArgSchema = {
   short: "m",
-  description: "Multiplexer type (tmux or wezterm, default: tmux)",
+  description: "Multiplexer type (tmux, wezterm, or herdr; auto-detects Herdr, otherwise tmux)",
   type: "string",
 };
 
@@ -62,15 +62,20 @@ export const ARG_VERBOSE: ArgSchema = {
   type: "boolean",
 };
 
+export const ARG_ENV: ArgSchema = {
+  short: "E",
+  description: "Environment variables to set (e.g., KEY=VALUE)",
+  type: "string",
+  multiple: true,
+};
+
 export function validateMux(value: unknown): MuxType {
-  const muxValue = (value || "tmux") as string;
-  if (!isMuxType(muxValue)) {
-    logger.error(
-      `Invalid multiplexer type '${muxValue}'. Supported values: ${SUPPORTED_MUXES.join(", ")}`,
-    );
+  try {
+    return resolveMux(value);
+  } catch (error) {
+    logger.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
-  return muxValue;
 }
 
 export function validateTargetPane(value: unknown, commandName: string): string {

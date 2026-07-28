@@ -1,6 +1,7 @@
 import { getLogger } from "@logtape/logtape";
 import { define } from "gunshi";
 import { openEditorAndGetContent } from "../modules/editor";
+import * as herdr from "../modules/herdr";
 import { setupLogger } from "../modules/logger";
 import { clearEditorPaneId, getCurrentPaneId, markAsEditorPane } from "../modules/tmux";
 import * as wezterm from "../modules/wezterm";
@@ -10,6 +11,7 @@ const logger = getLogger(["editprompt", "open"]);
 import {
   ARG_ALWAYS_COPY,
   ARG_EDITOR,
+  ARG_ENV,
   ARG_MUX,
   ARG_LOG_FILE,
   ARG_QUIET,
@@ -34,6 +36,8 @@ interface OpenEditorModeOptions {
 }
 
 export async function runOpenEditorMode(options: OpenEditorModeOptions): Promise<void> {
+  let herdrEditorPaneId: string | undefined;
+
   if (options.targetPanes.length > 0 && options.mux === "tmux") {
     try {
       const currentPaneId = await getCurrentPaneId();
@@ -45,6 +49,14 @@ export async function runOpenEditorMode(options: OpenEditorModeOptions): Promise
     try {
       const currentPaneId = await wezterm.getCurrentPaneId();
       await wezterm.markAsEditorPane(currentPaneId, options.targetPanes);
+    } catch {
+      //
+    }
+  } else if (options.targetPanes.length > 0 && options.mux === "herdr") {
+    try {
+      const currentPaneId = await herdr.getCurrentPaneId();
+      herdrEditorPaneId = currentPaneId;
+      await herdr.markAsEditorPane(currentPaneId, options.targetPanes);
     } catch {
       //
     }
@@ -109,6 +121,14 @@ export async function runOpenEditorMode(options: OpenEditorModeOptions): Promise
       } catch {
         //
       }
+    } else if (options.targetPanes.length > 0 && options.mux === "herdr") {
+      try {
+        for (const targetPane of options.targetPanes) {
+          await herdr.clearEditorPaneId(targetPane, herdrEditorPaneId);
+        }
+      } catch {
+        //
+      }
     }
   }
 }
@@ -124,12 +144,7 @@ export const openCommand = define({
     "log-file": ARG_LOG_FILE,
     quiet: ARG_QUIET,
     verbose: ARG_VERBOSE,
-    env: {
-      short: "E",
-      description: "Environment variables to set (e.g., KEY=VALUE)",
-      type: "string",
-      multiple: true,
-    },
+    env: ARG_ENV,
   },
   async run(ctx) {
     setupLogger({
